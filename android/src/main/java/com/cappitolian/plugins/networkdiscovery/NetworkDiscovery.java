@@ -41,7 +41,9 @@ public class NetworkDiscovery {
 
         // Agregar TXT records
         if (txtRecord != null) {
-            for (String key : txtRecord.keys()) {
+            Iterator<String> keys = txtRecord.keys();
+            while (keys.hasNext()) {
+            String key = keys.next();
                 try {
                     String value = txtRecord.getString(key);
                     serviceInfo.setAttribute(key, value);

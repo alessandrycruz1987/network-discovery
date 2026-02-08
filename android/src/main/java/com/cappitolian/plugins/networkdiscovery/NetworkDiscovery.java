@@ -179,13 +179,9 @@ public class NetworkDiscovery {
         // Agregar direcciones IP
         InetAddress host = serviceInfo.getHost();
         if (host != null) {
-            try {
-                JSONArray addresses = new JSONArray();
-                addresses.put(host.getHostAddress());
-                serviceData.put("addresses", addresses);
-            } catch (JSONException e) {
-                Log.e(TAG, "Error adding addresses", e);
-            }
+          JSONArray addresses = new JSONArray();
+          addresses.put(host.getHostAddress());
+          serviceData.put("addresses", addresses);
         }
         
         // Agregar TXT records

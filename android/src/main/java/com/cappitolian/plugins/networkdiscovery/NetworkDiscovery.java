@@ -13,6 +13,7 @@ import org.json.JSONException;
 
 import java.net.InetAddress;
 import java.util.Map;
+import java.util.Iterator;
 
 public class NetworkDiscovery {
     private static final String TAG = "NetworkDiscovery";

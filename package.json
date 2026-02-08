@@ -1,6 +1,6 @@
 {
   "name": "@cappitolian/network-discovery",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "A Capacitor plugin for network service discovery using mDNS/Bonjour. Allows automatic server-client connection without manual IP configuration.",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",

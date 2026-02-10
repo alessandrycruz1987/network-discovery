@@ -35,7 +35,7 @@ import { NetworkDiscovery } from '@cappitolian/network-discovery';
 // Start advertising your server
 await NetworkDiscovery.startAdvertising({
   serviceName: 'MyAppServer',
-  serviceType: '_http._tcp',  // or '_myapp._tcp' for custom service
+  serviceType: '_http._tcp',  // or '_myapp._tcp' for custom service to avoid conflicts with other services
   port: 8080,
   txtRecord: {
     ip: '192.168.1.100',      // Your server IP
@@ -69,7 +69,7 @@ NetworkDiscovery.addListener('serviceLost', (service) => {
 
 // Start discovery
 await NetworkDiscovery.startDiscovery({
-  serviceType: '_http._tcp',  // Must match the server's serviceType
+  serviceType: '_http._tcp',  // Must match the server's serviceType or '_myapp._tcp' for custom service to avoid conflicts with other services
   domain: 'local.'            // Optional, defaults to 'local.'
 });
 
@@ -94,7 +94,7 @@ async startServer() {
   // Advertise server
   await NetworkDiscovery.startAdvertising({
     serviceName: 'MyAppServer',
-    serviceType: '_myapp._tcp',
+    serviceType: '_http._tcp', // Must match the server's serviceType or '_myapp._tcp' for custom service to avoid conflicts with other services
     port: 8080,
     txtRecord: { 
       ip: ip,
@@ -138,7 +138,7 @@ async findAndConnectToServer() {
     
     // Start discovery
     NetworkDiscovery.startDiscovery({
-      serviceType: '_myapp._tcp'
+      serviceType: '_http._tcp' // Must match the server's serviceType or '_myapp._tcp' for custom service to avoid conflicts with other services
     });
     
     // Timeout after 10 seconds

@@ -6,11 +6,12 @@ A Capacitor plugin for network service discovery using mDNS/Bonjour. Allows auto
 
 ## Features
 
-- **Advertise services** on the local network (server mode)
+- **Publish services** on the local network (server mode)
 - **Discover services** automatically (client mode)
-- Pass custom data via TXT records (like IP addresses, ports, etc.)
-- Real-time service found/lost events
-- Works on **iOS** (Bonjour) and **Android** (NSD)
+- Pass custom metadata via TXT records (like HTTP port, version, etc.)
+- Anti-ghosting IP resolution logic
+- Works on **iOS** (Bonjour/NWListener) and **Android** (NSD)
+- Cross-platform compatible: iOS ↔ Android in both directions
 - Tested with **Capacitor 7** and **Ionic 8**
 
 ---
@@ -30,133 +31,48 @@ npx cap sync
 import { NetworkDiscovery } from '@cappitolian/network-discovery';
 ```
 
-### Server Mode - Advertise Your Service
+### Server Mode - Publish Your Service
 ```typescript
-// Start advertising your server
-await NetworkDiscovery.startAdvertising({
-  serviceName: 'MyAppServer',
-  serviceType: '_http._tcp',  // or '_myapp._tcp' for custom service to avoid conflicts with other services
-  port: 8080,
-  txtRecord: {
-    ip: '192.168.1.100',      // Your server IP
-    version: '1.0.0'          // Any custom data
+// Start publishing your server
+await NetworkDiscovery.startServer({
+  serviceName: 'SSSPOSServer',
+  serviceType: '_ssspos._tcp',
+  port: 8081,                    // Discovery service port
+  ip: '192.168.1.100',           // Your server IP
+  metadata: {
+    httpPort: '8080',            // Your actual HTTP server port
+    version: '1.0.0',            // Any custom data
+    deviceName: 'Main Server'
   }
 });
 
 console.log('Server is now discoverable on the network');
 
-// Stop advertising when needed
-await NetworkDiscovery.stopAdvertising();
+// Stop publishing when needed
+await NetworkDiscovery.stopServer();
 ```
 
 ### Client Mode - Discover Services
 ```typescript
-// Listen for discovered services
-NetworkDiscovery.addListener('serviceFound', (service) => {
-  console.log('Service discovered:', service);
-  console.log('Server IP:', service.txtRecord?.ip);
-  console.log('Server Port:', service.port);
-  console.log('Server Addresses:', service.addresses);
-  
-  // Connect to your server
-  connectToServer(service.addresses[0], service.port);
+// Find a server on the network
+const result = await NetworkDiscovery.findServer({
+  serviceName: 'SSSPOSServer',
+  serviceType: '_ssspos._tcp',
+  timeout: 15000                 // Optional, defaults to 10000ms
 });
 
-// Listen for lost services
-NetworkDiscovery.addListener('serviceLost', (service) => {
-  console.log('Service lost:', service.serviceName);
-});
-
-// Start discovery
-await NetworkDiscovery.startDiscovery({
-  serviceType: '_http._tcp',  // Must match the server's serviceType or '_myapp._tcp' for custom service to avoid conflicts with other services
-  domain: 'local.'            // Optional, defaults to 'local.'
-});
-
-// Stop discovery when needed
-await NetworkDiscovery.stopDiscovery();
-
-// Clean up listeners
-await NetworkDiscovery.removeAllListeners();
-```
-
-### Complete Example - Auto-Connect Flow
-
-**Server Side:**
-```typescript
-import { NetworkDiscovery } from '@cappitolian/network-discovery';
-import { Network } from '@capacitor/network';
-
-async startServer() {
-  // Get device IP
-  const ip = await this.getLocalIP();
+if (result) {
+  console.log('Server found!');
+  console.log('IP:', result.ip);
+  console.log('Discovery Port:', result.port);
+  console.log('HTTP Port:', result.metadata.httpPort);
+  console.log('Version:', result.metadata.version);
   
-  // Advertise server
-  await NetworkDiscovery.startAdvertising({
-    serviceName: 'MyAppServer',
-    serviceType: '_http._tcp', // Must match the server's serviceType or '_myapp._tcp' for custom service to avoid conflicts with other services
-    port: 8080,
-    txtRecord: { 
-      ip: ip,
-      serverName: 'Production Server'
-    }
-  });
-  
-  console.log('Server advertising on network');
-}
-
-async getLocalIP(): Promise<string> {
-  const status = await Network.getStatus();
-  // Your IP extraction logic here
-  return '192.168.1.100';
-}
-```
-
-**Client Side:**
-```typescript
-import { NetworkDiscovery } from '@cappitolian/network-discovery';
-
-async findAndConnectToServer() {
-  return new Promise((resolve, reject) => {
-    
-    // Listen for server
-    NetworkDiscovery.addListener('serviceFound', async (service) => {
-      if (service.serviceName === 'MyAppServer') {
-        console.log('Server found!');
-        
-        const serverIP = service.txtRecord?.ip || service.addresses[0];
-        const serverPort = service.port;
-        
-        // Stop discovery
-        await NetworkDiscovery.stopDiscovery();
-        await NetworkDiscovery.removeAllListeners();
-        
-        // Connect to server
-        resolve({ ip: serverIP, port: serverPort });
-      }
-    });
-    
-    // Start discovery
-    NetworkDiscovery.startDiscovery({
-      serviceType: '_http._tcp' // Must match the server's serviceType or '_myapp._tcp' for custom service to avoid conflicts with other services
-    });
-    
-    // Timeout after 10 seconds
-    setTimeout(() => {
-      reject(new Error('Server not found'));
-    }, 10000);
-  });
-}
-
-// Usage
-async onLoginClick() {
-  try {
-    const server = await this.findAndConnectToServer();
-    console.log(`Connecting to ${server.ip}:${server.port}`);
-    // Your connection logic here
-  } catch (error) {
-    console.error('Could not find server:', error);
-  }
+  // Connect to your HTTP server
+  const httpUrl = `http://${result.ip}:${result.metadata.httpPort}`;
+  // Make your API calls here
+} else {
+  console.log('Server not found within timeout');
 }
 ```
 
@@ -166,104 +82,70 @@ async onLoginClick() {
 
 ### Methods
 
-#### `startAdvertising(options: AdvertisingOptions)`
+#### `startServer(options: StartServerOptions)`
 
 Publishes a service on the local network.
 
 **Parameters:**
-- `serviceName` (string): Name of your service (e.g., "MyAppServer")
-- `serviceType` (string): Service type (e.g., "_http._tcp", "_myapp._tcp")
-- `port` (number): Port number your server is listening on
-- `txtRecord` (object, optional): Key-value pairs to broadcast (e.g., IP, version)
-
-**Returns:** `Promise<{ success: boolean }>`
-
----
-
-#### `stopAdvertising()`
-
-Stops advertising the service.
-
-**Returns:** `Promise<{ success: boolean }>`
-
----
-
-#### `startDiscovery(options: DiscoveryOptions)`
-
-Starts searching for services on the local network.
-
-**Parameters:**
-- `serviceType` (string): Type of service to search for (must match server's type)
-- `domain` (string, optional): Domain to search in (default: "local.")
-
-**Returns:** `Promise<void>`
-
----
-
-#### `stopDiscovery()`
-
-Stops the service discovery.
-
-**Returns:** `Promise<{ success: boolean }>`
-
----
-
-### Events
-
-#### `serviceFound`
-
-Fired when a service is discovered.
-
-**Payload:**
 ```typescript
 {
-  serviceName: string;
-  serviceType: string;
-  domain: string;
-  hostName: string;
-  port: number;
-  addresses: string[];        // Array of IP addresses
-  txtRecord?: {               // Custom data from server
+  serviceName: string;    // Name of your service
+  serviceType: string;    // Service type (e.g., "_ssspos._tcp")
+  port: number;           // Discovery service port
+  ip: string;             // Your server IP address
+  metadata?: {            // Optional custom key-value pairs
     [key: string]: string;
   };
 }
 ```
 
----
+#### `stopServer()`
 
-#### `serviceLost`
+Stops publishing the service.
 
-Fired when a previously discovered service is no longer available.
+#### `findServer(options: FindServerOptions)`
 
-**Payload:**
+Searches for a service on the local network.
+
+**Parameters:**
 ```typescript
 {
   serviceName: string;
   serviceType: string;
+  timeout?: number;       // Default: 10000ms
+}
+```
+
+**Returns:**
+```typescript
+{
+  ip: string;
+  port: number;
+  metadata: { [key: string]: string };
 }
 ```
 
 ---
 
-## Service Type Format
+## Architecture Best Practices
 
-Service types must follow the format: `_name._protocol`
+### Separate Ports Pattern
+```
+Port 8080 → HTTP Server (GET, POST, API endpoints)
+Port 8081 → Network Discovery (mDNS/Bonjour)
+```
 
-**Common examples:**
-- `_http._tcp` - HTTP service
-- `_https._tcp` - HTTPS service
-- `_myapp._tcp` - Custom app service
-- `_ssh._tcp` - SSH service
-
-**Recommended for apps:** Use a custom service type like `_myapp._tcp` to avoid conflicts with other services.
+**Why:**
+1. Avoids port binding conflicts
+2. Clear separation of concerns
+3. Easier debugging
+4. HTTP server can restart without affecting discovery
 
 ---
 
 ## Permissions
 
 ### Android
-
-Add to `AndroidManifest.xml`:
 ```xml
 <uses-permission android:name="android.permission.INTERNET" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -272,33 +154,26 @@ Add to `AndroidManifest.xml`:
 ```
 
 ### iOS
-
-No additional permissions required. Bonjour is enabled by default.
-
-Optionally, add to `Info.plist` to declare your service:
 ```xml
+<key>NSLocalNetworkUsageDescription</key>
+<string>This app needs access to the local network to discover and connect to other devices.</string>
+
 <key>NSBonjourServices</key>
 <array>
-    <string>_myapp._tcp</string>
+    <string>_ssspos._tcp</string>
 </array>
 ```
 
 ---
 
-## Platforms
+## Cross-Platform Compatibility
 
-- **iOS** (Bonjour/NetService)
-- **Android** (Network Service Discovery)
-- **Web** (Not implemented - throws unimplemented error)
-
----
-
-## Requirements
-
-- [Capacitor 7+](https://capacitorjs.com/)
-- [Ionic 8+](https://ionicframework.com/) (optional, but tested)
-- iOS 12.0+
-- Android API 16+ (Android 4.1+)
+| Server → Client | Status |
+|----------------|--------|
+| Android → Android | ✅ Working |
+| Android → iOS | ✅ Working |
+| iOS → Android | ✅ Working |
+| iOS → iOS | ✅ Working |
 
 ---
 
@@ -306,39 +181,41 @@ Optionally, add to `Info.plist` to declare your service:
 
 ### Services not being discovered
 
-1. **Check both devices are on the same WiFi network**
-2. **Verify service types match** exactly between server and client
-3. **Check firewall settings** - some networks block mDNS
-4. **Android:** Ensure multicast is enabled on your network
-5. **iOS:** Make sure device is not in Low Power Mode
+1. Check both devices are on same WiFi network
+2. Verify service types match exactly
+3. Check firewall/router settings (some block mDNS)
+4. Android: Ensure multicast is enabled
+5. iOS: Device not in Low Power Mode
 
-### Server not advertising
+### iOS Server not visible to Android
 
-1. **Verify port is not in use** by another service
-2. **Check network permissions** are granted
-3. **Restart the app** after installing the plugin
+**Fixed in v1.0.0+**
 
-### General debugging
+If still experiencing issues:
+1. Update to latest version
+2. Use separate ports (8080 for HTTP, 8081 for discovery)
+3. Check logs for "iOS Servidor LISTO" (iOS) and "NSD_DEBUG" (Android)
 
-Enable verbose logging:
-```typescript
-// Check plugin is loaded
-console.log('Plugin available:', NetworkDiscovery);
+### Debugging
 
-// Log all events
-NetworkDiscovery.addListener('serviceFound', (s) => console.log('Found:', s));
-NetworkDiscovery.addListener('serviceLost', (s) => console.log('Lost:', s));
+**Android:**
+```bash
+adb logcat | grep NSD_DEBUG
 ```
+
+**iOS:**
+Look for logs with `NSD_LOG:` in Xcode Console
 
 ---
 
-## Use Cases
+## Changelog
 
-- **Auto-connect apps** - Client automatically finds and connects to server
-- **Local multiplayer games** - Discover game hosts on LAN
-- **IoT device discovery** - Find smart devices without configuration
-- **File sharing apps** - Discover peers for file transfer
-- **Remote control apps** - Find controllable devices automatically
+### v1.0.0 (Current)
+- ✅ Fixed iOS server → Android client discovery
+- ✅ Added anti-ghosting IP resolution
+- ✅ Improved cross-platform compatibility
+- ✅ Enhanced logging for debugging
+- ✅ Support for separate discovery/HTTP ports
 
 ---
 
@@ -346,20 +223,6 @@ NetworkDiscovery.addListener('serviceLost', (s) => console.log('Lost:', s));
 
 MIT
 
----
-
-## Support
-
-If you encounter any issues or have feature requests, please open an issue on the [GitHub repository](https://github.com/alessandrycruz1987/network-discovery).
-
----
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
----
-
 ## Credits
 
-Created for use with Capacitor 7 and Ionic 8 applications requiring automatic network service discovery.
+Developed by Alessandry Cruz for Cappitolian projects.

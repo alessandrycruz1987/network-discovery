@@ -2,26 +2,38 @@ import { WebPlugin } from '@capacitor/core';
 
 import type {
   NetworkDiscoveryPlugin,
-  AdvertisingOptions,
-  DiscoveryOptions
+  StartServerOptions,
+  FindServerOptions,
+  DiscoveryResult,
 } from './definitions';
 
-export class NetworkDiscoveryWeb extends WebPlugin implements NetworkDiscoveryPlugin {
-  async startAdvertising(options: AdvertisingOptions): Promise<{ success: boolean }> {
-    console.log('startAdvertising', options);
-    throw this.unimplemented('Not implemented on web.');
+export class NetworkDiscoveryWeb
+  extends WebPlugin
+  implements NetworkDiscoveryPlugin {
+  async startServer(options: StartServerOptions): Promise<void> {
+    console.warn(
+      '[NetworkDiscovery Web] startServer no está disponible en web',
+      options
+    );
+    throw this.unavailable(
+      'Network Discovery no está soportado en plataforma web. Use en iOS o Android.'
+    );
   }
 
-  async stopAdvertising(): Promise<{ success: boolean }> {
-    throw this.unimplemented('Not implemented on web.');
+  async stopServer(): Promise<void> {
+    console.warn('[NetworkDiscovery Web] stopServer no está disponible en web');
+    throw this.unavailable(
+      'Network Discovery no está soportado en plataforma web. Use en iOS o Android.'
+    );
   }
 
-  async startDiscovery(options: DiscoveryOptions): Promise<void> {
-    console.log('startDiscovery', options);
-    throw this.unimplemented('Not implemented on web.');
-  }
-
-  async stopDiscovery(): Promise<{ success: boolean }> {
-    throw this.unimplemented('Not implemented on web.');
+  async findServer(options: FindServerOptions): Promise<DiscoveryResult> {
+    console.warn(
+      '[NetworkDiscovery Web] findServer no está disponible en web',
+      options
+    );
+    throw this.unavailable(
+      'Network Discovery no está soportado en plataforma web. Use en iOS o Android.'
+    );
   }
 }

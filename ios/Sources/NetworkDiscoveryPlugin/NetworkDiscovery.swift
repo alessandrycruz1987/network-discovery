@@ -1,158 +1,171 @@
 import Foundation
+import Network
 
 @objc public class NetworkDiscovery: NSObject {
-    private var netService: NetService?
-    private var netServiceBrowser: NetServiceBrowser?
-    private var discoveredServices: [NetService] = []
-    
-    weak var delegate: NetworkDiscoveryDelegate?
-    
-    @objc public func startAdvertising(
-        serviceName: String,
-        serviceType: String,
-        port: Int,
-        txtRecord: [String: String]?
-    ) {
-        netService = NetService(domain: "local.", type: serviceType, name: serviceName, port: Int32(port))
+    private var listener: NWListener?
+    private var browser: NWBrowser?
+    private var activeConnections: [NWConnection] = []
+
+    @objc public func startPublishing(name: String, type: String, port: Int, metadata: [String: String]) throws {
+        stopServer()
+        let nwPort = NWEndpoint.Port(integerLiteral: UInt16(port))
+        let cleanType = type.contains("_") ? type : "_\(type)._tcp"
         
-        // Configurar TXT record
-        if let txtRecord = txtRecord, !txtRecord.isEmpty {
-            var txtData: [String: Data] = [:]
-            for (key, value) in txtRecord {
-                txtData[key] = value.data(using: .utf8)
-            }
-            let txtRecordData = NetService.data(fromTXTRecord: txtData)
-            netService?.setTXTRecord(txtRecordData)
+        let ipForName = metadata["ip"] ?? ""
+        let displayName = ipForName.isEmpty ? name : "\(name)-\(ipForName)"
+        
+        let mappedMetadata = metadata.mapValues { $0.data(using: .utf8)! }
+        let txtData = NetService.data(fromTXTRecord: mappedMetadata)
+        
+        // --- CONFIGURACIÓN MEJORADA PARA COMPATIBILIDAD CROSS-PLATFORM ---
+        let params = NWParameters.tcp
+        params.includePeerToPeer = true
+        params.allowLocalEndpointReuse = true // Permite reutilización del puerto
+        params.acceptLocalOnly = false // Acepta conexiones de toda la red local
+        
+        // Configuración adicional para que Android pueda resolver
+        if let tcpOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+            tcpOptions.version = .any // IPv4 e IPv6
         }
         
-        netService?.delegate = self
-        netService?.publish()
+        let service = NWListener.Service(name: displayName, type: cleanType, domain: nil, txtRecord: txtData)
+        
+        listener = try NWListener(using: params, on: nwPort)
+        listener?.service = service
+        
+        // --- HANDLER CRÍTICO: Aceptar conexiones entrantes ---
+        listener?.newConnectionHandler = { [weak self] connection in
+            print("NSD_LOG: iOS recibió conexión de: \(connection.endpoint)")
+            
+            // Iniciar la conexión para que Android pueda resolver el servicio
+            connection.start(queue: .main)
+            self?.activeConnections.append(connection)
+            
+            // Configurar handlers básicos
+            connection.stateUpdateHandler = { state in
+                if case .ready = state {
+                    print("NSD_LOG: Conexión establecida con Android")
+                }
+            }
+            
+            // Limpieza automática cuando la conexión termine
+            connection.receiveMessage { _, _, _, error in
+                if error != nil {
+                    connection.cancel()
+                    self?.activeConnections.removeAll { $0 === connection }
+                }
+            }
+        }
+        
+        listener?.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                if let port = self.listener?.port {
+                    print("NSD_LOG: ✅ iOS Servidor LISTO en puerto \(port): \(displayName)")
+                }
+            case .failed(let error):
+                print("NSD_LOG: ❌ iOS Servidor falló: \(error)")
+            case .waiting(let error):
+                print("NSD_LOG: ⏳ iOS Servidor esperando: \(error)")
+            default:
+                break
+            }
+        }
+        
+        listener?.start(queue: .main)
+        
+        // Pequeño delay para asegurar que el servicio esté completamente publicado
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            print("NSD_LOG: Servicio iOS completamente inicializado")
+        }
     }
-    
-    @objc public func stopAdvertising() {
-        netService?.stop()
-        netService = nil
+
+    @objc public func findService(name: String, type: String, timeout: TimeInterval, completion: @escaping ([String: Any]?) -> Void) {
+        stopDiscovery()
+        let cleanType = type.contains("_") ? type : "_\(type)._tcp"
+        
+        // Configuración mejorada para el browser
+        let params = NWParameters()
+        params.includePeerToPeer = true
+        
+        let browser = NWBrowser(for: .bonjour(type: cleanType, domain: nil), using: params)
+        self.browser = browser
+        var finished = false
+
+        browser.browseResultsChangedHandler = { [weak self] results, _ in
+            for result in results {
+                if case let .service(foundName, _, _, _) = result.endpoint, foundName.contains(name) {
+                    if !finished {
+                        finished = true
+                        
+                        print("NSD_LOG: iOS Cliente encontró servicio: \(foundName)")
+                        
+                        var meta: [String: String] = [:]
+                        if case let .bonjour(txt) = result.metadata {
+                            for (k, v) in txt.dictionary {
+                                if let dataValue = v as? Data {
+                                    meta[k] = String(data: dataValue, encoding: .utf8) ?? ""
+                                }
+                            }
+                        }
+                        
+                        // --- LÓGICA DE EXTRACCIÓN ROBUSTA ---
+                        var ip = meta["ip"] ?? ""
+                        
+                        if (ip.isEmpty || ip == "0.0.0.0") && foundName.contains("-") {
+                            ip = foundName.components(separatedBy: "-").last ?? ""
+                        }
+                        
+                        if ip.isEmpty || ip == "0.0.0.0" {
+                            if case let .hostPort(host, _) = result.endpoint {
+                                ip = "\(host)".components(separatedBy: "%").first ?? "\(host)"
+                            }
+                        }
+
+                        print("NSD_LOG: IP extraída: \(ip)")
+                        
+                        self?.stopDiscovery()
+                        completion(["ip": ip, "port": 8081, "metadata": meta])
+                    }
+                    return
+                }
+            }
+        }
+        
+        browser.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                print("NSD_LOG: iOS Browser listo para buscar")
+            case .failed(let error):
+                print("NSD_LOG: iOS Browser falló: \(error)")
+            default:
+                break
+            }
+        }
+        
+        browser.start(queue: .main)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            if !finished {
+                finished = true
+                print("NSD_LOG: iOS Búsqueda timeout")
+                self?.stopDiscovery()
+                completion(nil)
+            }
+        }
     }
-    
-    @objc public func startDiscovery(serviceType: String, domain: String = "local.") {
-        netServiceBrowser = NetServiceBrowser()
-        netServiceBrowser?.delegate = self
-        netServiceBrowser?.searchForServices(ofType: serviceType, inDomain: domain)
+
+    @objc public func stopServer() {
+        // Limpiar todas las conexiones activas
+        activeConnections.forEach { $0.cancel() }
+        activeConnections.removeAll()
+        
+        listener?.cancel()
+        listener = nil
+        print("NSD_LOG: iOS Servidor detenido")
     }
     
     @objc public func stopDiscovery() {
-        netServiceBrowser?.stop()
-        netServiceBrowser = nil
-        discoveredServices.removeAll()
+        browser?.cancel()
+        browser = nil
     }
-}
-
-// MARK: - NetServiceDelegate
-extension NetworkDiscovery: NetServiceDelegate {
-    public func netServiceDidPublish(_ sender: NetService) {
-        print("Service published: \(sender.name)")
-        delegate?.advertisingDidStart()
-    }
-    
-    public func netService(_ sender: NetService, didNotPublish errorDict: [String : NSNumber]) {
-        print("Service did not publish: \(errorDict)")
-        let errorCode = errorDict[NetService.errorCode]?.intValue ?? -1
-        delegate?.advertisingDidFail(error: "Failed to publish service. Error code: \(errorCode)")
-    }
-}
-
-// MARK: - NetServiceBrowserDelegate
-extension NetworkDiscovery: NetServiceBrowserDelegate {
-    public func netServiceBrowserDidStopSearch(_ browser: NetServiceBrowser) {
-        print("Service discovery stopped")
-    }
-    
-    public func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String : NSNumber]) {
-        print("Service discovery failed: \(errorDict)")
-        let errorCode = errorDict[NetService.errorCode]?.intValue ?? -1
-        delegate?.discoveryDidFail(error: "Discovery failed. Error code: \(errorCode)")
-    }
-    
-    public func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        print("Service found: \(service.name)")
-        discoveredServices.append(service)
-        service.delegate = self
-        service.resolve(withTimeout: 5.0)
-    }
-    
-    public func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
-        print("Service lost: \(service.name)")
-        
-        let serviceData: [String: Any] = [
-            "serviceName": service.name,
-            "serviceType": service.type
-        ]
-        
-        delegate?.serviceLost(serviceData: serviceData)
-        
-        if let index = discoveredServices.firstIndex(of: service) {
-            discoveredServices.remove(at: index)
-        }
-    }
-    
-    public func netServiceDidResolveAddress(_ sender: NetService) {
-        print("Service resolved: \(sender.name)")
-        
-        var addresses: [String] = []
-        
-        if let addressesData = sender.addresses {
-            for addressData in addressesData {
-                let address = addressData.withUnsafeBytes { (pointer: UnsafeRawBufferPointer) -> String? in
-                    guard let baseAddress = pointer.baseAddress else { return nil }
-                    let data = baseAddress.assumingMemoryBound(to: sockaddr.self)
-                    
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(data, socklen_t(addressData.count), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
-                        return String(cString: hostname)
-                    }
-                    return nil
-                }
-                
-                if let addr = address {
-                    addresses.append(addr)
-                }
-            }
-        }
-        
-        var serviceData: [String: Any] = [
-            "serviceName": sender.name,
-            "serviceType": sender.type,
-            "domain": sender.domain,
-            "hostName": sender.hostName ?? "",
-            "port": sender.port,
-            "addresses": addresses
-        ]
-        
-        // Agregar TXT record
-        if let txtData = sender.txtRecordData() {
-            let txtRecord = NetService.dictionary(fromTXTRecord: txtData)
-            var txtRecordDict: [String: String] = [:]
-            for (key, value) in txtRecord {
-                if let strValue = String(data: value, encoding: .utf8) {
-                    txtRecordDict[key] = strValue
-                }
-            }
-            serviceData["txtRecord"] = txtRecordDict
-        }
-        
-        delegate?.serviceFound(serviceData: serviceData)
-    }
-    
-    public func netService(_ sender: NetService, didNotResolve errorDict: [String : NSNumber]) {
-        print("Service did not resolve: \(errorDict)")
-    }
-}
-
-// MARK: - Delegate Protocol
-@objc public protocol NetworkDiscoveryDelegate: AnyObject {
-    func advertisingDidStart()
-    func advertisingDidFail(error: String)
-    func serviceFound(serviceData: [String: Any])
-    func serviceLost(serviceData: [String: Any])
-    func discoveryDidFail(error: String)
 }

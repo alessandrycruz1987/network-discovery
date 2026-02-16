@@ -1,68 +1,83 @@
 export interface NetworkDiscoveryPlugin {
   /**
-   * Publica el servicio en la red local
+   * Inicia el servidor de descubrimiento en la red local
+   * @param options Opciones de configuración del servidor
    */
-  startAdvertising(options: AdvertisingOptions): Promise<{ success: boolean }>;
+  startServer(options: StartServerOptions): Promise<void>;
 
   /**
-   * Detiene la publicación del servicio
+   * Detiene el servidor de descubrimiento
    */
-  stopAdvertising(): Promise<{ success: boolean }>;
+  stopServer(): Promise<void>;
 
   /**
-   * Busca servicios en la red local
+   * Busca un servidor en la red local
+   * @param options Opciones de búsqueda
+   * @returns Información del servidor encontrado o null si no se encuentra
    */
-  startDiscovery(options: DiscoveryOptions): Promise<void>;
-
-  /**
-   * Detiene la búsqueda de servicios
-   */
-  stopDiscovery(): Promise<{ success: boolean }>;
-
-  /**
-   * Listener para cuando se descubre un servicio
-   */
-  addListener(
-    eventName: 'serviceFound',
-    listenerFunc: (service: ServiceInfo) => void,
-  ): Promise<PluginListenerHandle>;
-
-  /**
-   * Listener para cuando se pierde un servicio
-   */
-  addListener(
-    eventName: 'serviceLost',
-    listenerFunc: (service: ServiceInfo) => void,
-  ): Promise<PluginListenerHandle>;
-
-  /**
-   * Remueve todos los listeners
-   */
-  removeAllListeners(): Promise<void>;
+  findServer(options: FindServerOptions): Promise<DiscoveryResult>;
 }
 
-export interface AdvertisingOptions {
+export interface StartServerOptions {
+  /**
+   * Nombre del servicio (ej: 'SSSPOSServer')
+   */
   serviceName: string;
-  serviceType: string; // e.g., "_http._tcp"
-  port: number;
-  txtRecord?: { [key: string]: string }; // Para pasar la IP u otros datos
-}
 
-export interface DiscoveryOptions {
-  serviceType: string; // e.g., "_http._tcp"
-  domain?: string; // default: "local."
-}
-
-export interface ServiceInfo {
-  serviceName: string;
+  /**
+   * Tipo de servicio (ej: '_ssspos._tcp')
+   */
   serviceType: string;
-  domain: string;
-  hostName: string;
+
+  /**
+   * Puerto en el que se publica el servicio de discovery (ej: 8081)
+   */
   port: number;
-  addresses: string[]; // IPs del servicio
-  txtRecord?: { [key: string]: string };
+
+  /**
+   * IP del servidor (se incluirá en metadata y nombre)
+   */
+  ip: string;
+
+  /**
+   * Metadata adicional (ej: { httpPort: '8080', version: '1.0' })
+   */
+  metadata?: { [key: string]: string };
 }
 
-export interface PluginListenerHandle {
-  remove: () => Promise<void>;
+export interface FindServerOptions {
+  /**
+   * Nombre del servicio a buscar (ej: 'SSSPOSServer')
+   */
+  serviceName: string;
+
+  /**
+   * Tipo de servicio (ej: '_ssspos._tcp')
+   */
+  serviceType: string;
+
+  /**
+   * Timeout de búsqueda en milisegundos (default: 10000)
+   */
+  timeout?: number;
 }
+
+export interface DiscoveryResult {
+  /**
+   * Dirección IP del servidor encontrado
+   */
+  ip: string;
+
+  /**
+   * Puerto del servidor encontrado
+   */
+  port: number;
+
+  /**
+   * Metadata del servidor (incluye datos como httpPort, version, etc.)
+   */
+  metadata: { [key: string]: string };
+}
+
+// Alias para compatibilidad con tu código existente
+export interface DiscoveryOptions extends StartServerOptions { }

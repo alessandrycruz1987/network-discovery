@@ -11,6 +11,7 @@ import java.util.Map;
 
 @CapacitorPlugin(name = "NetworkDiscovery")
 public class NetworkDiscoveryPlugin extends Plugin {
+    // Private properties
     private NetworkDiscovery implementation;
 
     @Override
@@ -24,10 +25,11 @@ public class NetworkDiscoveryPlugin extends Plugin {
         String type = call.getString("serviceType");
         Integer port = call.getInt("port", 8081);
         JSObject metaJS = call.getObject("metadata");
-
         Map<String, String> metadata = new HashMap<>();
+
         if (metaJS != null) {
             Iterator<String> keys = metaJS.keys();
+
             while (keys.hasNext()) {
                 String key = keys.next();
                 metadata.put(key, metaJS.getString(key));
@@ -35,16 +37,30 @@ public class NetworkDiscoveryPlugin extends Plugin {
         }
 
         implementation.startServer(name, type, port, metadata, new NetworkDiscovery.Callback() {
-            @Override public void success(JSObject data) { call.resolve(data); }
-            @Override public void error(String msg) { call.reject(msg); }
+            @Override
+            public void success(JSObject data) {
+                call.resolve(data);
+            }
+
+            @Override
+            public void error(String msg) {
+                call.reject(msg);
+            }
         });
     }
 
     @PluginMethod
     public void stopServer(PluginCall call) {
         implementation.stopServer(new NetworkDiscovery.Callback() {
-            @Override public void success(JSObject data) { call.resolve(data); }
-            @Override public void error(String msg) { call.reject(msg); }
+            @Override
+            public void success(JSObject data) {
+                call.resolve(data);
+            }
+
+            @Override
+            public void error(String msg) {
+                call.reject(msg);
+            }
         });
     }
 
@@ -55,8 +71,15 @@ public class NetworkDiscoveryPlugin extends Plugin {
         Integer timeout = call.getInt("timeout", 10000);
 
         implementation.findServer(name, type, timeout, new NetworkDiscovery.Callback() {
-            @Override public void success(JSObject data) { call.resolve(data); }
-            @Override public void error(String msg) { call.reject(msg); }
+            @Override
+            public void success(JSObject data) {
+                call.resolve(data);
+            }
+
+            @Override
+            public void error(String msg) {
+                call.reject(msg);
+            }
         });
     }
 }

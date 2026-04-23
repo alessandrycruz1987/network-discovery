@@ -16,9 +16,10 @@ public class NetworkDiscoveryPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func startServer(_ call: CAPPluginCall) {
         guard let name = call.getString("serviceName"),
               let type = call.getString("serviceType"),
-              let port = call.getInt("port") else { return call.reject("Faltan parámetros") }
+              let port = call.getInt("port") else { return call.reject("Missing parameters") }
         
         let metadata = call.getObject("metadata") as? [String: String] ?? [:]
+        
         do {
             try implementation.startPublishing(name: name, type: type, port: port, metadata: metadata)
             call.resolve()
@@ -32,9 +33,10 @@ public class NetworkDiscoveryPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func findServer(_ call: CAPPluginCall) {
         guard let name = call.getString("serviceName"),
-              let type = call.getString("serviceType") else { return call.reject("Faltan parámetros") }
+              let type = call.getString("serviceType") else { return call.reject("Missing parameters") }
         
         let timeout = Double(call.getInt("timeout") ?? 10000) / 1000.0
+
         implementation.findService(name: name, type: type, timeout: timeout) { result in
             if let data = result { call.resolve(data) } 
             else { call.reject("TIMEOUT_ERROR") }

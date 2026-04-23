@@ -2,53 +2,55 @@ import Foundation
 import Network
 
 @objc public class NetworkDiscovery: NSObject {
+    // Private properties
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var activeConnections: [NWConnection] = []
 
     @objc public func startPublishing(name: String, type: String, port: Int, metadata: [String: String]) throws {
         stopServer()
+
         let nwPort = NWEndpoint.Port(integerLiteral: UInt16(port))
         let cleanType = type.contains("_") ? type : "_\(type)._tcp"
-        
         let ipForName = metadata["ip"] ?? ""
         let displayName = ipForName.isEmpty ? name : "\(name)-\(ipForName)"
-        
         let mappedMetadata = metadata.mapValues { $0.data(using: .utf8)! }
         let txtData = NetService.data(fromTXTRecord: mappedMetadata)
         
-        // --- CONFIGURACIÓN MEJORADA PARA COMPATIBILIDAD CROSS-PLATFORM ---
+        // --- IMPROVED CONFIGURATION FOR CROSS-PLATFORM COMPATIBILITY ---
         let params = NWParameters.tcp
+
         params.includePeerToPeer = true
-        params.allowLocalEndpointReuse = true // Permite reutilización del puerto
-        params.acceptLocalOnly = false // Acepta conexiones de toda la red local
+        params.allowLocalEndpointReuse = true // Allows port reuse
+        params.acceptLocalOnly = false // Accepts connections from the entire local network
         
-        // Configuración adicional para que Android pueda resolver
+        // Additional configuration to ensure Android can resolve the service
         if let tcpOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            tcpOptions.version = .any // IPv4 e IPv6
+            tcpOptions.version = .any // IPv4 or IPv6
         }
         
         let service = NWListener.Service(name: displayName, type: cleanType, domain: nil, txtRecord: txtData)
         
         listener = try NWListener(using: params, on: nwPort)
+
         listener?.service = service
         
-        // --- HANDLER CRÍTICO: Aceptar conexiones entrantes ---
+        // --- CRITICAL HANDLER: Accept incoming connections ---
         listener?.newConnectionHandler = { [weak self] connection in
-            print("NSD_LOG: iOS recibió conexión de: \(connection.endpoint)")
+            print("NSD_LOG: iOS received connection from: \(connection.endpoint)")
             
-            // Iniciar la conexión para que Android pueda resolver el servicio
+            // Start the connection so that Android can resolve the service
             connection.start(queue: .main)
             self?.activeConnections.append(connection)
             
-            // Configurar handlers básicos
+            // Configure basic handlers
             connection.stateUpdateHandler = { state in
                 if case .ready = state {
-                    print("NSD_LOG: Conexión establecida con Android")
+                    print("NSD_LOG: Connection established with Android")
                 }
             }
             
-            // Limpieza automática cuando la conexión termine
+            // Automatic cleanup when the connection ends
             connection.receiveMessage { _, _, _, error in
                 if error != nil {
                     connection.cancel()
@@ -61,12 +63,12 @@ import Network
             switch state {
             case .ready:
                 if let port = self.listener?.port {
-                    print("NSD_LOG: ✅ iOS Servidor LISTO en puerto \(port): \(displayName)")
+                    print("NSD_LOG: iOS Discovery READY on port \(port): \(displayName)")
                 }
             case .failed(let error):
-                print("NSD_LOG: ❌ iOS Servidor falló: \(error)")
+                print("NSD_LOG: ❌ iOS Discovery failed: \(error)")
             case .waiting(let error):
-                print("NSD_LOG: ⏳ iOS Servidor esperando: \(error)")
+                print("NSD_LOG: ⏳ iOS Discovery waiting: \(error)")
             default:
                 break
             }
@@ -74,9 +76,9 @@ import Network
         
         listener?.start(queue: .main)
         
-        // Pequeño delay para asegurar que el servicio esté completamente publicado
+        // Small delay to ensure the service is fully published
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            print("NSD_LOG: Servicio iOS completamente inicializado")
+            print("NSD_LOG: iOS Discovery fully initialized")
         }
     }
 
@@ -84,12 +86,15 @@ import Network
         stopDiscovery()
         let cleanType = type.contains("_") ? type : "_\(type)._tcp"
         
-        // Configuración mejorada para el browser
+        // Improved configuration for the browser
         let params = NWParameters()
+
         params.includePeerToPeer = true
         
         let browser = NWBrowser(for: .bonjour(type: cleanType, domain: nil), using: params)
+
         self.browser = browser
+
         var finished = false
 
         browser.browseResultsChangedHandler = { [weak self] results, _ in
@@ -98,9 +103,10 @@ import Network
                     if !finished {
                         finished = true
                         
-                        print("NSD_LOG: iOS Cliente encontró servicio: \(foundName)")
+                        print("NSD_LOG: iOS Client found service: \(foundName)")
                         
                         var meta: [String: String] = [:]
+
                         if case let .bonjour(txt) = result.metadata {
                             for (k, v) in txt.dictionary {
                                 if let dataValue = v as? Data {
@@ -109,7 +115,7 @@ import Network
                             }
                         }
                         
-                        // --- LÓGICA DE EXTRACCIÓN ROBUSTA ---
+                        // --- ROBUST EXTRACTION LOGIC ---
                         var ip = meta["ip"] ?? ""
                         
                         if (ip.isEmpty || ip == "0.0.0.0") && foundName.contains("-") {
@@ -122,11 +128,13 @@ import Network
                             }
                         }
 
-                        print("NSD_LOG: IP extraída: \(ip)")
+                        print("NSD_LOG: Extracted IP: \(ip)")
                         
                         self?.stopDiscovery()
+
                         completion(["ip": ip, "port": 8081, "metadata": meta])
                     }
+                    
                     return
                 }
             }
@@ -135,9 +143,9 @@ import Network
         browser.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                print("NSD_LOG: iOS Browser listo para buscar")
+                print("NSD_LOG: iOS Browser ready to search")
             case .failed(let error):
-                print("NSD_LOG: iOS Browser falló: \(error)")
+                print("NSD_LOG: iOS Browser failed: \(error)")
             default:
                 break
             }
@@ -147,25 +155,31 @@ import Network
         DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
             if !finished {
                 finished = true
-                print("NSD_LOG: iOS Búsqueda timeout")
+
+                print("NSD_LOG: iOS Browser timeout")
+
                 self?.stopDiscovery()
+
                 completion(nil)
             }
         }
     }
 
     @objc public func stopServer() {
-        // Limpiar todas las conexiones activas
+        // Clear all active connections
         activeConnections.forEach { $0.cancel() }
         activeConnections.removeAll()
         
         listener?.cancel()
         listener = nil
-        print("NSD_LOG: iOS Servidor detenido")
+
+        print("NSD_LOG: iOS Discovery stopped")
     }
     
     @objc public func stopDiscovery() {
         browser?.cancel()
         browser = nil
+
+        print("NSD_LOG: iOS Discovery stopped")
     }
 }

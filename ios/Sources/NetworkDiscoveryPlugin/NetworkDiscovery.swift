@@ -2,55 +2,77 @@ import Foundation
 import Network
 
 @objc public class NetworkDiscovery: NSObject {
+    // Internal struct to store discovered service info (matching Android's DiscoveredService)
+    private struct DiscoveredService {
+        let ip: String
+        let port: Int
+        let metadata: [String: Any]
+        let timestamp: Int64
+        
+        init(ip: String, port: Int, metadata: [String: Any], timestamp: Int64) {
+            self.ip = ip
+            self.port = port
+            self.metadata = metadata
+            self.timestamp = timestamp
+        }
+    }
+    
     // Private properties
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var activeConnections: [NWConnection] = []
-
+    private var discoveredServices: [DiscoveredService] = []
+    private var isDiscovering = false
+    private var discoveryWorkItem: DispatchWorkItem?
+        
     @objc public func startPublishing(name: String, type: String, port: Int, metadata: [String: String]) throws {
         stopServer()
-
+        
         let nwPort = NWEndpoint.Port(integerLiteral: UInt16(port))
         let cleanType = type.contains("_") ? type : "_\(type)._tcp"
-        let ipForName = metadata["ip"] ?? ""
+        
+        // Create mutable metadata with timestamp (matching Android behavior)
+        var mutableMetadata = metadata
+        
+        // Always inject current timestamp (matching Android behavior)
+        let timestamp = String(Int64(Date().timeIntervalSince1970 * 1000))
+        mutableMetadata["timestamp"] = timestamp
+        
+        let ipForName = mutableMetadata["ip"] ?? ""
         let displayName = ipForName.isEmpty ? name : "\(name)-\(ipForName)"
-        let mappedMetadata = metadata.mapValues { $0.data(using: .utf8)! }
+        
+        // Convert metadata to TXT record format
+        let mappedMetadata = mutableMetadata.mapValues { $0.data(using: .utf8)! }
         let txtData = NetService.data(fromTXTRecord: mappedMetadata)
         
-        // --- IMPROVED CONFIGURATION FOR CROSS-PLATFORM COMPATIBILITY ---
+        // Configure parameters for cross-platform compatibility
         let params = NWParameters.tcp
-
         params.includePeerToPeer = true
-        params.allowLocalEndpointReuse = true // Allows port reuse
-        params.acceptLocalOnly = false // Accepts connections from the entire local network
+        params.allowLocalEndpointReuse = true
+        params.acceptLocalOnly = false
         
-        // Additional configuration to ensure Android can resolve the service
         if let tcpOptions = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            tcpOptions.version = .any // IPv4 or IPv6
+            tcpOptions.version = .any
         }
         
         let service = NWListener.Service(name: displayName, type: cleanType, domain: nil, txtRecord: txtData)
         
         listener = try NWListener(using: params, on: nwPort)
-
         listener?.service = service
         
-        // --- CRITICAL HANDLER: Accept incoming connections ---
+        // Handle incoming connections (needed for Android to resolve)
         listener?.newConnectionHandler = { [weak self] connection in
             print("NSD_LOG: iOS received connection from: \(connection.endpoint)")
             
-            // Start the connection so that Android can resolve the service
             connection.start(queue: .main)
             self?.activeConnections.append(connection)
             
-            // Configure basic handlers
             connection.stateUpdateHandler = { state in
                 if case .ready = state {
                     print("NSD_LOG: Connection established with Android")
                 }
             }
             
-            // Automatic cleanup when the connection ends
             connection.receiveMessage { _, _, _, error in
                 if error != nil {
                     connection.cancel()
@@ -81,61 +103,102 @@ import Network
             print("NSD_LOG: iOS Discovery fully initialized")
         }
     }
-
+        
     @objc public func findService(name: String, type: String, timeout: TimeInterval, completion: @escaping ([String: Any]?) -> Void) {
         stopDiscovery()
-        let cleanType = type.contains("_") ? type : "_\(type)._tcp"
         
-        // Improved configuration for the browser
-        let params = NWParameters()
+        let cleanType = type.contains("_") ? type : "_\(type)._tcp"
 
+        discoveredServices.removeAll()
+        isDiscovering = true
+        
+        // Configure browser parameters
+        let params = NWParameters()
         params.includePeerToPeer = true
         
         let browser = NWBrowser(for: .bonjour(type: cleanType, domain: nil), using: params)
-
         self.browser = browser
+        
+        // Set up timeout (matching Android's Handler.postDelayed)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isDiscovering else { return }
 
-        var finished = false
+            self.isDiscovering = false
+            
+            print("NSD_LOG: iOS Browser timeout")
 
+            self.stopDiscovery()
+            
+            // Select best service based on highest timestamp (matching Android's selectBestService)
+            self.selectBestService(completion: completion)
+        }
+
+        discoveryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: workItem)
+        
         browser.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self = self, self.isDiscovering else { return }
+            
             for result in results {
-                if case let .service(foundName, _, _, _) = result.endpoint, foundName.contains(name) {
-                    if !finished {
-                        finished = true
-                        
-                        print("NSD_LOG: iOS Client found service: \(foundName)")
-                        
-                        var meta: [String: String] = [:]
-
-                        if case let .bonjour(txt) = result.metadata {
-                            for (k, v) in txt.dictionary {
-                                if let dataValue = v as? Data {
-                                    meta[k] = String(data: dataValue, encoding: .utf8) ?? ""
-                                }
+                if case let .service(foundName, _, _, _) = result.endpoint {
+                    // Check if service name starts with our target name (matching Android behavior)
+                    guard foundName.hasPrefix(name) else { continue }
+                    
+                    print("NSD_LOG: iOS Client found service: \(foundName)")
+                    
+                    var meta: [String: String] = [:]
+                    
+                    // Extract TXT record metadata
+                    if case let .bonjour(txt) = result.metadata {
+                        for (key, value) in txt.dictionary {
+                            if let dataValue = value as? Data {
+                                meta[key] = String(data: dataValue, encoding: .utf8) ?? ""
                             }
                         }
-                        
-                        // --- ROBUST EXTRACTION LOGIC ---
-                        var ip = meta["ip"] ?? ""
-                        
-                        if (ip.isEmpty || ip == "0.0.0.0") && foundName.contains("-") {
-                            ip = foundName.components(separatedBy: "-").last ?? ""
-                        }
-                        
-                        if ip.isEmpty || ip == "0.0.0.0" {
-                            if case let .hostPort(host, _) = result.endpoint {
-                                ip = "\(host)".components(separatedBy: "%").first ?? "\(host)"
-                            }
-                        }
-
-                        print("NSD_LOG: Extracted IP: \(ip)")
-                        
-                        self?.stopDiscovery()
-
-                        completion(["ip": ip, "port": 8081, "metadata": meta])
                     }
                     
-                    return
+                    // Extract IP address (matching Android's robust extraction logic)
+                    var ip = meta["ip"] ?? ""
+                    
+                    // Try to extract IP from service name
+                    if (ip.isEmpty || ip == "0.0.0.0") && foundName.contains("-") {
+                        ip = foundName.components(separatedBy: "-").last ?? ""
+                    }
+                    
+                    // Try to extract from endpoint or get local IP
+                    if ip.isEmpty || ip == "0.0.0.0" {
+                        ip = self.getIPAddress() ?? ""
+                    }
+                    
+                    if ip.isEmpty || ip == "0.0.0.0" {
+                        continue
+                    }
+                    
+                    print("NSD_LOG: Extracted IP: \(ip)")
+                    
+                    // Try to extract port from metadata
+                    var port = 8081 // default port
+
+                    if let portStr = meta["port"], let extractedPort = Int(portStr) {
+                        port = extractedPort
+                    }
+                    
+                    // Extract timestamp (matching Android behavior)
+                    var timestamp: Int64 = 0
+
+                    if let timestampStr = meta["timestamp"] {
+                        timestamp = Int64(timestampStr) ?? 0
+                    }
+                    
+                    // Create DiscoveredService object
+                    let service = DiscoveredService(
+                        ip: ip,
+                        port: port,
+                        metadata: meta,
+                        timestamp: timestamp
+                    )
+                    
+                    self.discoveredServices.append(service)
                 }
             }
         }
@@ -146,40 +209,105 @@ import Network
                 print("NSD_LOG: iOS Browser ready to search")
             case .failed(let error):
                 print("NSD_LOG: iOS Browser failed: \(error)")
+
+                if self.isDiscovering {
+                    self.isDiscovering = false
+
+                    self.stopDiscovery()
+
+                    completion(nil)
+                }
             default:
                 break
             }
         }
         
         browser.start(queue: .main)
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
-            if !finished {
-                finished = true
-
-                print("NSD_LOG: iOS Browser timeout")
-
-                self?.stopDiscovery()
-
-                completion(nil)
-            }
-        }
     }
-
+        
     @objc public func stopServer() {
-        // Clear all active connections
+        // Cancel all active connections
         activeConnections.forEach { $0.cancel() }
         activeConnections.removeAll()
         
+        // Cancel listener
         listener?.cancel()
         listener = nil
-
+        
         print("NSD_LOG: iOS Discovery stopped")
     }
     
     @objc public func stopDiscovery() {
+        // Cancel timeout work item
+        discoveryWorkItem?.cancel()
+        discoveryWorkItem = nil
+        
+        // Cancel browser
         browser?.cancel()
         browser = nil
-
+        
+        isDiscovering = false
+        
         print("NSD_LOG: iOS Discovery stopped")
+    }
+        
+    // Select best service based on highest timestamp (matching Android's selectBestService)
+    private func selectBestService(completion: @escaping ([String: Any]?) -> Void) {
+        if discoveredServices.isEmpty {
+            completion(nil)
+
+            return
+        }
+        
+        // Find service with highest timestamp
+        guard let bestService = discoveredServices.max(by: { $0.timestamp < $1.timestamp }) else {
+            completion(nil)
+
+            return
+        }
+        
+        let result: [String: Any] = [
+            "ip": bestService.ip,
+            "port": bestService.port,
+            "metadata": bestService.metadata
+        ]
+        
+        completion(result)
+    }
+    
+    // Helper to get device IP address
+    private func getIPAddress() -> String? {
+        var address: String?
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        
+        if getifaddrs(&ifaddr) == 0 {
+            var ptr = ifaddr
+
+            while ptr != nil {
+                defer { ptr = ptr?.pointee.ifa_next }
+                
+                guard let interface = ptr?.pointee else { continue }
+
+                let addrFamily = interface.ifa_addr.pointee.sa_family
+                
+                if addrFamily == UInt8(AF_INET) {
+                    let name = String(cString: interface.ifa_name)
+
+                    if name == "en0" { // WiFi interface
+                        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+
+                        getnameinfo(interface.ifa_addr, socklen_t(interface.ifa_addr.pointee.sa_len),
+                                   &hostname, socklen_t(hostname.count),
+                                   nil, socklen_t(0), NI_NUMERICHOST)
+
+                        address = String(cString: hostname)
+                    }
+                }
+            }
+
+            freeifaddrs(ifaddr)
+        }
+        
+        return address
     }
 }

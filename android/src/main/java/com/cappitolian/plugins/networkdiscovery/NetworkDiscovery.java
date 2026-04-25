@@ -9,9 +9,6 @@ import android.os.Looper;
 import com.getcapacitor.JSObject;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.HashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
 public class NetworkDiscovery {
     // Private properties
@@ -19,10 +16,6 @@ public class NetworkDiscovery {
     private WifiManager.MulticastLock multicastLock;
     private NsdManager.RegistrationListener activeRegistrationListener;
     private NsdManager.DiscoveryListener activeDiscoveryListener;
-
-    // Private static properties
-    // Use a short delay to assume discovery is "done" after the last response
-    private static final int QUIESCENCE_DELAY_MS = 3000;
 
     public interface Callback {
         void success(JSObject data);
@@ -45,15 +38,8 @@ public class NetworkDiscovery {
         if (!multicastLock.isHeld())
             multicastLock.acquire();
 
-        // Create a copy to handle ImmutableMap cases from the JS bridge
-        Map<String, String> finalMetadata = (metadata != null) ? new HashMap<>(metadata) : new HashMap<>();
-
-        // Inject current timestamp to identify the freshest instance
-        long timestamp = System.currentTimeMillis();
-
-        finalMetadata.put("ts", String.valueOf(timestamp));
-
-        String ipForName = finalMetadata.containsKey("ip") ? finalMetadata.get("ip") : "";
+        // TRICK: Include the IP in the name in case metadata fails on iOS
+        String ipForName = (metadata != null && metadata.containsKey("ip")) ? metadata.get("ip") : "";
         String displayName = ipForName.isEmpty() ? name : name + "-" + ipForName;
         NsdServiceInfo serviceInfo = new NsdServiceInfo();
 
@@ -61,8 +47,11 @@ public class NetworkDiscovery {
         serviceInfo.setServiceType(type);
         serviceInfo.setPort(port);
 
-        for (Map.Entry<String, String> entry : finalMetadata.entrySet()) {
-            serviceInfo.setAttribute(entry.getKey().toLowerCase(), entry.getValue());
+        // IMPORTANT: Set attributes before registering
+        if (metadata != null) {
+            for (Map.Entry<String, String> entry : metadata.entrySet()) {
+                serviceInfo.setAttribute(entry.getKey().toLowerCase(), entry.getValue());
+            }
         }
 
         activeRegistrationListener = new NsdManager.RegistrationListener() {
@@ -90,39 +79,11 @@ public class NetworkDiscovery {
 
     public void findServer(String name, String type, int timeout, final Callback callback) {
         stopDiscovery();
-
         if (!multicastLock.isHeld())
             multicastLock.acquire();
 
         final String cleanType = type.startsWith("_") ? type : "_" + type;
         final boolean[] finished = { false };
-        final Handler mainHandler = new Handler(Looper.getMainLooper());
-
-        // Tracking for the freshest service found
-        final AtomicLong bestTimestamp = new AtomicLong(-1);
-        final AtomicReference<JSObject> bestResult = new AtomicReference<>(null);
-
-        // This Runnable will return the result when the network goes quiet
-        final Runnable deliverBestResult = new Runnable() {
-            @Override
-            public void run() {
-                if (!finished[0]) {
-                    finished[0] = true;
-
-                    stopDiscovery();
-
-                    JSObject winner = bestResult.get();
-
-                    if (winner != null) {
-                        System.out.println("NSD_DEBUG: Network quiet. Delivering best candidate.");
-
-                        callback.success(winner);
-                    } else {
-                        callback.error("TIMEOUT_ERROR");
-                    }
-                }
-            }
-        };
 
         activeDiscoveryListener = new NsdManager.DiscoveryListener() {
             @Override
@@ -134,72 +95,67 @@ public class NetworkDiscovery {
                 if (!finished[0]) {
                     finished[0] = true;
 
-                    mainHandler.removeCallbacks(deliverBestResult);
-
                     callback.error("START_FAIL");
                 }
             }
 
             @Override
             public void onServiceFound(NsdServiceInfo service) {
+                // 1. Log to see what Android is actually seeing before filtering
+                System.out.println("NSD_DEBUG: Service found on network: " + service.getServiceName());
+
+                // 2. Strict filter: The name must start with the exact prefix
                 if (service.getServiceName().startsWith(name)) {
                     nsdManager.resolveService(service, new NsdManager.ResolveListener() {
                         @Override
                         public void onResolveFailed(NsdServiceInfo nsi, int i) {
+                            System.out.println("NSD_DEBUG: Failed to resolve service: " + i);
                         }
 
                         @Override
                         public void onServiceResolved(NsdServiceInfo resolved) {
-                            if (finished[0])
-                                return;
+                            if (!finished[0]) {
+                                String sName = resolved.getServiceName();
 
-                            // Extract IP and Metadata
-                            String sName = resolved.getServiceName();
-                            String ipFromName = sName.contains("-") ? sName.substring(sName.lastIndexOf("-") + 1) : "";
-                            String resolvedIp = resolved.getHost().getHostAddress();
-                            if (resolvedIp.startsWith("/"))
-                                resolvedIp = resolvedIp.substring(1);
-                            String finalIp = (!ipFromName.isEmpty()) ? ipFromName : resolvedIp;
+                                // --- ANTI-GHOSTING LOGIC ---
+                                // Try to extract the IP from the name first (it's the source of truth)
+                                String ipFromName = "";
 
-                            if (finalIp.equals("0.0.0.0") || finalIp.isEmpty())
-                                return;
-
-                            // Parse timestamp for comparison
-                            long currentTs = -1;
-                            Map<String, byte[]> attributes = resolved.getAttributes();
-
-                            if (attributes.containsKey("ts")) {
-                                try {
-                                    currentTs = Long
-                                            .parseLong(new String(attributes.get("ts"), StandardCharsets.UTF_8));
-                                } catch (Exception e) {
-                                    currentTs = 0;
+                                if (sName.contains("-")) {
+                                    ipFromName = sName.substring(sName.lastIndexOf("-") + 1);
                                 }
-                            }
 
-                            // Build JSON result
-                            JSObject res = new JSObject();
-                            JSObject meta = new JSObject();
+                                // If the name doesn't have an IP, use the one resolved by the system
+                                String resolvedIp = resolved.getHost().getHostAddress();
 
-                            for (Map.Entry<String, byte[]> entry : attributes.entrySet()) {
-                                meta.put(entry.getKey(), new String(entry.getValue(), StandardCharsets.UTF_8));
-                            }
+                                if (resolvedIp.startsWith("/"))
+                                    resolvedIp = resolvedIp.substring(1);
 
-                            res.put("ip", finalIp);
-                            res.put("port", resolved.getPort());
-                            res.put("metadata", meta);
+                                // Final IP decision
+                                String finalIp = (!ipFromName.isEmpty()) ? ipFromName : resolvedIp;
 
-                            // Thread-safe candidate update
-                            synchronized (bestTimestamp) {
-                                if (currentTs > bestTimestamp.get()) {
-                                    bestTimestamp.set(currentTs);
-                                    bestResult.set(res);
+                                // IMPORTANT: If the resolved IP is 0.0.0.0 or empty, ignore this event
+                                if (finalIp.equals("0.0.0.0") || finalIp.isEmpty())
+                                    return;
 
-                                    // Reset the "Silence Timer" every time a valid service is resolved.
-                                    // This prevents burning the full timeout if we've already found everything.
-                                    mainHandler.removeCallbacks(deliverBestResult);
-                                    mainHandler.postDelayed(deliverBestResult, QUIESCENCE_DELAY_MS);
+                                finished[0] = true;
+
+                                stopDiscovery();
+
+                                JSObject res = new JSObject();
+                                JSObject meta = new JSObject();
+
+                                for (Map.Entry<String, byte[]> entry : resolved.getAttributes().entrySet()) {
+                                    meta.put(entry.getKey(), new String(entry.getValue(), StandardCharsets.UTF_8));
                                 }
+
+                                res.put("ip", finalIp);
+                                res.put("port", resolved.getPort());
+                                res.put("metadata", meta);
+
+                                System.out.println("NSD_DEBUG: Final IP delivered to Client: " + finalIp);
+
+                                callback.success(res);
                             }
                         }
                     });
@@ -220,9 +176,15 @@ public class NetworkDiscovery {
         };
 
         nsdManager.discoverServices(cleanType, NsdManager.PROTOCOL_DNS_SD, activeDiscoveryListener);
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (!finished[0]) {
+                finished[0] = true;
 
-        // Safety hard-timeout: If the network is noisy, we don't wait forever
-        mainHandler.postDelayed(deliverBestResult, timeout);
+                stopDiscovery();
+
+                callback.error("TIMEOUT_ERROR");
+            }
+        }, timeout);
     }
 
     public void stopServer(Callback c) {
@@ -231,13 +193,12 @@ public class NetworkDiscovery {
                 nsdManager.unregisterService(activeRegistrationListener);
             } catch (Exception e) {
             }
-
-            activeRegistrationListener = null;
         }
 
-        if (multicastLock != null && multicastLock.isHeld())
-            multicastLock.release();
+        activeRegistrationListener = null;
 
+        if (multicastLock.isHeld())
+            multicastLock.release();
         if (c != null)
             c.success(new JSObject());
     }
@@ -246,13 +207,16 @@ public class NetworkDiscovery {
         if (activeDiscoveryListener != null) {
             try {
                 nsdManager.stopServiceDiscovery(activeDiscoveryListener);
+                System.out.println("NSD_DEBUG: Discovery stopped.");
             } catch (Exception e) {
                 System.out.println("NSD_DEBUG: Error stopping discovery: " + e.getMessage());
             }
+
             activeDiscoveryListener = null;
         }
-
-        if (multicastLock != null && multicastLock.isHeld())
+        // Release the lock only if the process is completely stopped
+        if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
+        }
     }
 }
